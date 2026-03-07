@@ -1,0 +1,5 @@
+venv/
+pcap_files/
+__pycache__/
+.vscode/
+.env
