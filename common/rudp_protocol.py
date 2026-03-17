@@ -7,6 +7,12 @@ SLOW_START = 0
 CONGESTION_AVOIDANCE = 1
 FAST_RECOVERY = 2
 
+STATE_NAMES = {
+    SLOW_START: "SLOW_START",
+    CONGESTION_AVOIDANCE: "CONGESTION_AVOIDANCE",
+    FAST_RECOVERY: "FAST_RECOVERY"
+}
+
 class RUDPSocket:
     """
     A reliable UDP socket wrapper.
@@ -60,7 +66,7 @@ class RUDPSocket:
         base = 0 # Index of the first unacked packet (Left edge of the window)
         next_seq = 0 # Index of the next packet to be sent 
 
-        print(f"[RUDP] Starting transfer of {total_packets} packets. Initial CWND: {self.cwnd}")
+        print(f"[RUDP] Starting transfer of {total_packets} packets. Initial CWND: {self.cwnd}. State: {STATE_NAMES[self.cc_state]}")
 
         # [MAIN LOOP]
         # We stay here until the 'base' reaches 'total_packets', meaning everything is ACKed.
@@ -68,36 +74,27 @@ class RUDPSocket:
 
             # [CALCULATING WINDOW SIZE]
             # Logic: We calculate 'window_limit' which is the right edge of our current window.
-            # We are allowed to send packets from 'next_seq' up to 'window_limit'.
             window_limit = base + int(self.cwnd) 
 
             # [CONDITION]: Can we send more packets right now within our quota?
-            # If next_seq < window_limit, the sliding window has 'room' for more data.
             while next_seq < total_packets and next_seq < window_limit:
                 pkt = packets[next_seq]
                 
-                # [RELIABILITY SIMULATOR] (Testing Reliability)
-                # Decide whether to drop or send the packet
-                # Simulating an unreliable channel to trigger Retransmission/Fast Retransmit logic.
-                if not self._should_drop_packet(drop_probability=0.30):
-                    # [SENDING PACKET]
-                    # Packet is physically sent to the wire.
+                # [SENDING PACKET]
+                if not self._should_drop_packet(drop_probability=0):
                     self.sock.sendto(pkt.pack(), self.dest_addr)
                 else:
-                    # Packet is lost. We still increment next_seq to move through the window.
                     print(f"[SIMULATOR] Dropped packet Seq {pkt.seq_num} deliberately.")
-
-                print(f"[DEBUG] Sent Seq {pkt.seq_num} (CWND: {self.cwnd:.2f}, State: {self.cc_state})")
+                
+                print(f"[DEBUG] Sent Seq {pkt.seq_num} (CWND: {self.cwnd:.2f}, State: {STATE_NAMES[self.cc_state]})")
+                
                 # After sending, we move the 'next_seq' cursor forward, but we do NOT move the 'base' until ACKs are received.
                 next_seq += 1
 
             
             # [WAITING FOR ACKS]
-            # Logic: The window is now "full" (next_seq == window_limit) or we sent everything.
-            # We are blocking to hear back from the receiver to slide the window forward.
             try:
                 # [RECEIVING ACKS]
-                # Listening for an ACK packet from the receiver's IP/Port.
                 data_raw, addr = self.sock.recvfrom(1024)
                 ack_pkt = Packet.unpack(data_raw)
 
@@ -106,64 +103,60 @@ class RUDPSocket:
 
                     # [CONDITION]: Is this a NEW ACK (moving the left edge of the window)?
                     if ack_pkt.seq_num >= base:
-
+                        print(f"[RUDP-SENDER] Received valid ACK {ack_pkt.seq_num}. Advancing base.")
+                        
                         # --- Valid NEW ACK ---
-                        # Sliding the window to the next unacked packet.
-                        # Implement cumulative ACK logic.
                         base = ack_pkt.seq_num + 1
                         
                         # [CONDITION]: TCP RENO - Did we just receive a new ACK while in Fast Recovery?
                         if self.cc_state == FAST_RECOVERY:
                             # [EXIT FAST RECOVERY]
-                            # Deflate window back to ssthresh, set dupACKcount to 0,
-                            # and return to Congestion Avoidance.
                             self.cwnd = self.ssthresh
                             self.cc_state = CONGESTION_AVOIDANCE
                             self.dup_acks = 0
                         else:
                             # Normal Success (Slow Start or Congestion Avoidance)
-                            # Grow window based on current state.
                             self._handle_success_cc()
+                            print(f"[RUDP-SENDER] CWND updated to {self.cwnd:.2f}. Current State: {STATE_NAMES[self.cc_state]}")
                             self.dup_acks = 0
                             
                         # Update last ACK received to the current ACK's sequence number
-                        # To identify subsequent duplicate ACKs.
                         self.last_ack_received = ack_pkt.seq_num
 
                     # [CONDITION]: Is this a duplicate ACK (receiver is still waiting for 'base')?
                     elif ack_pkt.seq_num == self.last_ack_received:
                         # --- Duplicate ACK ---
                         self.dup_acks += 1
+                        print(f"[RUDP-SENDER] Received Duplicate ACK {ack_pkt.seq_num}. (Dup Count: {self.dup_acks})")
                         
                         # [CONDITION]: Are we already in Fast Recovery?
                         if self.cc_state == FAST_RECOVERY:
-                            # [INCREMENT WINDOW] TCP RENO - Every dup ACK suggests another packet reached the receiver.
+                            # [INCREMENT WINDOW] TCP RENO
                             self.cwnd += 1
+                            print(f"[RUDP-SENDER] Fast Recovery: Inflating window. CWND: {self.cwnd:.2f}")
+
                         # [CONDITION]: Triple Duplicate ACK detected (Fast Retransmit trigger)
                         elif self.dup_acks == 3:
                             print(f"[RUDP] 3 Dup ACKs! Fast Recovery triggered for Seq {base}!")
                             
                             # From SS/CA to FAST_RECOVERY
-                            # TCP RENO - We cut the window in half (ssthresh) and set cwnd to ssthresh + 3 (for the 3 dup ACKs).
                             self.ssthresh = max(2, int(self.cwnd / 2))
                             self.cwnd = self.ssthresh + 3
                             self.cc_state = FAST_RECOVERY
+
+                            print(f"[RUDP-SENDER] Window cut in half! New ssthresh: {self.ssthresh}, New CWND: {self.cwnd:.2f}")
                             
                             # Retransmit ONLY the missing packet at 'base' immediately
                             resend_pkt = packets[base]
                             self.sock.sendto(resend_pkt.pack(), self.dest_addr)
 
             # [CONDITION]: Packet Loss / Heavy Congestion
-            # [TIMEOUT] We heard nothing for 'self.timeout' seconds.
-            #  Severe congestion assumed. 
             except socket.timeout:
                 # --- Congestion Control Logic: Timeout ---
                 print(f"[RUDP] Timeout! Packet lost at base index {base}. Reducing Window.")
-                # We reset CWND to 1 and return to SLOW_START.
                 self._handle_timeout_cc()
                 
                 # [UPDATE] Simple Go-Back-N Fallback Recovery
-                # Reset the sending cursor to the last unacked packet to re-evaluate the window.
                 next_seq = base
                     
             except Exception as e:
@@ -171,8 +164,6 @@ class RUDPSocket:
                 break
         
         # [TERMINATION]
-        # All data acknowledged. Terminating the session.
-        # Sending a FIN flag to tell the receiver we are done. 
         print("[RUDP] Sending FIN packet to terminate transfer.")
         fin_pkt = Packet(seq_num=total_packets, is_fin=True)
         self.sock.sendto(fin_pkt.pack(), self.dest_addr)
@@ -186,8 +177,6 @@ class RUDPSocket:
         packets = []
 
         for i, frag in enumerate(fragments):
-            # Creates a Packet. Note: In a real connection, seq_num should persist.
-            # For this simple implementation, we reset seq_num per message or handle it globally.
             p = Packet(seq_num=i, data=frag)
             packets.append(p)
 
@@ -211,35 +200,28 @@ class RUDPSocket:
                 self.dest_addr = addr  # Update destination for ACKs
                 pkt = Packet.unpack(data_raw)
                 
-                # [CONDITION]: Is this a FIN packet? If so, we are done receiving.
-                # If it's a FIN packet, acknowledge it and finish
+                # [CONDITION]: Is this a FIN packet?
                 if pkt.is_fin:
                     ack_pkt = Packet(seq_num=pkt.seq_num, is_ack=True)
-                    # Indicate to the sender that we received the FIN
                     self.sock.sendto(ack_pkt.pack(), addr)
                     print("[RUDP] Received FIN. End of transmission.")
                     break
                 
-                # [CONDITION]: Is this a data packet (not an ACK/Control)
+                # [CONDITION]: Is this a data packet?
                 if not pkt.is_ack:
-                    # Store data if it is the expected next sequence
                     if pkt.seq_num == expected_seq:
                         received_fragments[pkt.seq_num] = pkt.data
                         expected_seq += 1
                         
-                        # Move the expected_seq forward for any buffered out-of-order packets
                         while expected_seq in received_fragments:
                             expected_seq += 1
 
                     # [CONDITION] Is this an out-of-order packet?
                     elif pkt.seq_num > expected_seq:
-                        # Buffer out-of-order packet
                         if pkt.seq_num not in received_fragments:
                             received_fragments[pkt.seq_num] = pkt.data
 
-                    # Send a cumulative ACK (ACKing the last continuous packet received)
-                    # Even if expected_seq is 0, we send ACK -1 to properly trigger duplicate ACKs 
-                    # on the sender side if the very first packet is lost.
+                    # Send a cumulative ACK
                     ack_pkt = Packet(seq_num=expected_seq - 1, is_ack=True)
                     self.sock.sendto(ack_pkt.pack(), addr)
                             
@@ -266,6 +248,8 @@ class RUDPSocket:
             self.cc_state = SLOW_START
             self.cwnd += 1
         else:
+            if self.cc_state == SLOW_START:
+                print(f"[RUDP-SENDER] CWND crossed ssthresh ({self.ssthresh}). Transitioning to CONGESTION AVOIDANCE!")
             # Congestion Avoidance: Linear Growth
             self.cc_state = CONGESTION_AVOIDANCE
             self.cwnd += 1.0 / self.cwnd

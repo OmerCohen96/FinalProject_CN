@@ -50,13 +50,12 @@ def get_dhcp_ip(mac_address, dhcp_addr=('127.0.0.1', 6767)):
     except Exception as e:
         print(f"[CLIENT DHCP] Error: {e}")
     finally:
-        # [TEARDOWN] Always release the socket resource
         sock.close()
         
     return None
 
 
-def get_dns_resolution(domain, dns_addr=('127.0.0.1', 5353)):
+def get_dns_resolution(domain, dns_addr=('127.0.0.1', 53530)):
     """
     Resolves a logical domain name (e.g., ai-server.local) to a physical IP and Port 
     using the local DNS server over UDP.

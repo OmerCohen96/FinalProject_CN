@@ -15,7 +15,7 @@ class DHCPServer:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(self.address)
         
-        # [STATE] IP Pool for DHCP (10 IPs for simplicity)
+        # IP Pool for DHCP (10 IPs for simplicity)
         self.ip_pool = [f"192.168.1.{i}" for i in range(100, 110)]
         self.allocated_ips = {}  # Maps MAC Address -> Allocated IP
 

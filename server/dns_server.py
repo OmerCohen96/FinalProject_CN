@@ -10,8 +10,8 @@ class DNSServer:
     its low overhead and speed.
     """
     
-    # Fix Port For DNS Server is 53 but we will use 5353 to avoid permission issues.
-    def __init__(self, host='127.0.0.1', port=5353):
+    # Fix Port For DNS Server is 53 but we will use 53530 to avoid permission issues.
+    def __init__(self, host='127.0.0.1', port=53530):
         self.address = (host, port)
         
         # [TRANSPORT LAYER] Creating a UDP socket (SOCK_DGRAM)
